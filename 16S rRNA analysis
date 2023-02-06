@@ -39,3 +39,258 @@ library(ggtree) # for visualizing phylogenetic trees
 library(ape) # for manipulating phylogenetic trees
 
 setwd("~/Dropbox/entre_mares/Amostras_leo_Marbella-238770543/amostras_mundo")
+
+setwd("~/Dropbox/entre_mares/Amostras_leo_Marbella-238770543/amostras_mundo")
+
+# Se quiser usar apenas as amostras do óleo sequenciadas, remover # da linha abaixo
+#setwd("~/Dropbox/entre_mares/Amostras_leo_Marbella-238770543/")
+otu <- read.table(file = "feature-table.tsv", sep = "\t", header = T, row.names = 1, 
+                  skip = 1, comment.char = "")
+taxonomy <- read.table(file = "taxonomy.tsv", sep = "\t", header = T ,row.names = 1)
+
+# clean the taxonomy, Greengenes format
+tax <- taxonomy %>%
+  select(Taxon) %>% 
+  separate(Taxon, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), "; ")
+
+tax.clean <- data.frame(row.names = row.names(tax),
+                        Kingdom = str_replace(tax[,1], "k__",""),
+                        Phylum = str_replace(tax[,2], "p__",""),
+                        Class = str_replace(tax[,3], "c__",""),
+                        Order = str_replace(tax[,4], "o__",""),
+                        Family = str_replace(tax[,5], "f__",""),
+                        Genus = str_replace(tax[,6], "g__",""),
+                        Species = str_replace(tax[,7], "s__",""),
+                        stringsAsFactors = FALSE)
+
+tax.clean[is.na(tax.clean)] <- ""
+tax.clean[tax.clean=="__"] <- ""
+
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,7] != ""){
+    tax.clean$Species[i] <- paste(tax.clean$Genus[i], tax.clean$Species[i], sep = " ")
+  } else if (tax.clean[i,2] == ""){
+    kingdom <- paste("Unclassified", tax.clean[i,1], sep = " ")
+    tax.clean[i, 2:7] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Unclassified", tax.clean[i,2], sep = " ")
+    tax.clean[i, 3:7] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Unclassified", tax.clean[i,3], sep = " ")
+    tax.clean[i, 4:7] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Unclassified", tax.clean[i,4], sep = " ")
+    tax.clean[i, 5:7] <- order
+  } else if (tax.clean[i,6] == ""){
+    family <- paste("Unclassified", tax.clean[i,5], sep = " ")
+    tax.clean[i, 6:7] <- family
+  } else if (tax.clean[i,7] == ""){
+    tax.clean$Species[i] <- paste("Unclassified ",tax.clean$Genus[i], sep = " ")
+  }
+}
+
+metadata <- read.table(file = "metadata_mundo.tsv", sep = "\t", header = T, row.names = 1)
+#metadata <- read.table(file = "../metadata.tsv", sep = "\t", header = T, row.names = 1)
+
+OTU = otu_table(as.matrix(otu), taxa_are_rows = TRUE)
+TAX = tax_table(as.matrix(tax.clean))
+SAMPLE <- sample_data(metadata)
+TREE = read_tree("tree.nwk")
+
+# merge the data
+
+ps <- phyloseq(OTU, TAX, SAMPLE,TREE)
+
+set.seed(111) # keep result reproductive
+
+# Heatmap com abundância diferenciada
+
+setwd("~/Dropbox/entre_mares/Amostras_leo_Marbella-238770543/amostras_mundo")
+
+#metadata<-read_q2metadata("metadata_mundo.tsv")
+metadata<-read_q2metadata("../metadata.tsv")
+
+SVs<-read_qza("table-dada2.qza")$data
+taxonomy<-read_qza("silva-taxonomy.qza")$data
+
+
+SVs<-apply(SVs, 2, function(x) x/sum(x)*100) #convert to percent
+
+SVsToPlot<-  
+  data.frame(MeanAbundance=rowMeans(SVs)) %>% #find the average abundance of a SV
+  rownames_to_column("Feature.ID") %>%
+  arrange(desc(MeanAbundance)) %>%
+  top_n(40, MeanAbundance) %>% # top 40
+  pull(Feature.ID) #extract only the names from the table
+
+SVs %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature.ID") %>%
+  gather(-Feature.ID, key="SampleID", value="Abundance") %>%
+  mutate(Feature.ID=if_else(Feature.ID %in% SVsToPlot,  Feature.ID, "Remainder")) %>% #flag features to be collapsed
+  group_by(SampleID, Feature.ID) %>%
+  summarize(Abundance=sum(Abundance)) %>%
+  left_join(metadata) %>%
+  mutate(NormAbundance=log10(Abundance+0.01)) %>% # do a log10 transformation after adding a 0.01% pseudocount. Could also add 1 read before transformation to percent
+  left_join(taxonomy) %>%
+  mutate(Feature=paste(Feature.ID, Taxon)) %>%
+  mutate(Feature=gsub("[kpcofgs]__", "", Feature)) %>% # trim out leading text from taxonomy string
+  ggplot(aes(x=SampleID, y=Feature, fill=NormAbundance)) +
+  geom_tile() +
+  facet_grid(~`contamination`, scales="free_x") +
+  theme_q2r() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  scale_fill_viridis_c(name="log10(% Abundance)")
+ggsave("heatmap-gg.pdf", height=4, width=11, device="pdf") # save a PDF 3 inches by 4 inches
+
+
+### Alfa-diversidade
+
+ps.rarefied = rarefy_even_depth(ps, rngseed=1, sample.size=1103, replace=F)
+
+plot_richness(ps.rarefied,  measures=c("Observed", "Shannon")) +
+  geom_boxplot(size=2) +
+  theme_classic() +
+  theme(text = element_text(size = 14),strip.background = element_blank(), axis.text.x.bottom = element_text(angle = -90))
+
+rich = estimate_richness(ps.rarefied, measures = c("Observed", "Shannon"))
+wilcox.observed <- pairwise.wilcox.test(rich$Observed, 
+                                        sample_data(ps.rarefied)$country, 
+                                        p.adjust.method = "BH")
+tab.observed <- wilcox.observed$p.value %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "group1") %>%
+  gather(key="group2", value="p.adj", -group1) %>%
+  na.omit()
+tab.observed
+
+## Beta-diversidade
+
+dist = phyloseq::distance(ps.rarefied, method="bray")
+ordination = ordinate(ps.rarefied, method="PCoA", distance=dist)
+plot_ordination(ps.rarefied, ordination, color="estado") + 
+# se for do mundo desmarcar o comentário abaixo
+#plot_ordination(ps.rarefied, ordination, color="substract", shape = "country") + 
+  geom_point(size=5) +
+  theme_classic() +
+  theme(strip.background = element_blank(),text = element_text(size = 14))
+
+
+#ANOSIM
+
+metadata <- data.frame(sample_data(ps.rarefied))
+anosim(dist, metadata$estado)
+
+##### taxonomia - barplot
+
+ps.rel = transform_sample_counts(ps, function(x) x/sum(x)*100)
+# agglomerate taxa
+glom <- tax_glom(ps.rel, taxrank = 'Phylum', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Phylum <- as.character(ps.melt$Phylum)
+
+ps.melt <- ps.melt %>%
+  group_by(country, Phylum) %>%
+  mutate(median=median(Abundance))
+# select group median > 1
+keep <- unique(ps.melt$Phylum[ps.melt$median > 1])
+ps.melt$Phylum[!(ps.melt$Phylum %in% keep)] <- "< 1%"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,country,Phylum) %>%
+  summarise(Abundance=sum(Abundance))
+
+ggplot(ps.melt_sum, aes(x = Sample, y = Abundance, fill = Phylum)) + 
+  geom_bar(stat = "identity", aes(fill=Phylum)) + 
+  labs(x="", y="%") +
+  facet_wrap(~country, scales= "free_x", nrow=1) +
+  theme_classic() + 
+  theme(strip.background = element_blank(), 
+        axis.text.x.bottom = element_text(angle = -90))
+
+
+## Gênero
+
+ps.rel = transform_sample_counts(ps, function(x) x/sum(x)*100)
+# agglomerate taxa
+glom <- tax_glom(ps.rel, taxrank = 'Genus', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Genus <- as.character(ps.melt$Genus)
+
+ps.melt <- ps.melt %>%
+  group_by(country, Genus) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Genus[ps.melt$median > 2.5])
+ps.melt$Genus[!(ps.melt$Genus %in% keep)] <- "< 2.5%"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,country,Genus) %>%
+  summarise(Abundance=sum(Abundance))
+
+ggplot(ps.melt_sum, aes(x = Sample, y = Abundance, fill = Genus)) + 
+  geom_bar(stat = "identity", aes(fill=Genus)) + 
+  labs(x="", y="%") +
+  facet_wrap(~country, scales= "free_x", nrow=1) +
+  theme_classic() + 
+  theme(legend.position = "right", 
+        strip.background = element_blank(), 
+        axis.text.x.bottom = element_text(angle = -90))
+
+
+## Def-seq
+
+library("pheatmap")
+library("ComplexHeatmap")
+
+# ps é o arquivo obtido lá em cima
+
+sample_data(ps)$country <- as.factor(sample_data(ps)$country) # factorize for DESeq2
+ps.taxa <- tax_glom(ps, taxrank = 'Species', NArm = FALSE)
+
+ps.taxa.pse <- ps.taxa
+otu_table(ps.taxa.pse) <- otu_table(ps.taxa) + 1
+# pairwise comparison between gut and tongue
+ps.taxa.pse.sub <- subset_samples(ps.taxa.pse)
+ds = phyloseq_to_deseq2(ps.taxa.pse.sub, ~ country)
+ds = DESeq(ds, test="Wald", fitType="parametric")
+alpha = 0.05 
+res = results(ds, alpha=alpha)
+res = res[order(res$padj, na.last=NA), ]
+taxa_sig = rownames(res[1:20, ]) # select bottom 20 with lowest p.adj values
+ps.taxa.rel <- transform_sample_counts(ps, function(x) x/sum(x)*100)
+ps.taxa.rel.sig <- prune_taxa(taxa_sig, ps.taxa.rel)
+# Only keep gut and tongue samples
+ps.taxa.rel.sig <- prune_samples(colnames(otu_table(ps.taxa.pse.sub)), ps.taxa.rel.sig)
+
+matrix <- as.matrix(data.frame(otu_table(ps.taxa.rel.sig)))
+rownames(matrix) <- as.character(tax_table(ps.taxa.rel.sig)[, "Species"])
+metadata_sub <- data.frame(sample_data(ps.taxa.rel.sig))
+# Define the annotation color for columns and rows
+annotation_col = data.frame(
+  `country` = as.factor(metadata_sub$country), 
+  check.names = FALSE
+)
+rownames(annotation_col) = rownames(metadata_sub)
+
+annotation_row = data.frame(
+  Phylum = as.factor(tax_table(ps.taxa.rel.sig)[, "Phylum"])
+)
+rownames(annotation_row) = rownames(matrix)
+
+# ann_color should be named vectors
+phylum_col = RColorBrewer::brewer.pal(length(levels(annotation_row$Phylum)), "Paired")
+names(phylum_col) = levels(annotation_row$Phylum)
+ann_colors = list(
+  `country` = c(Brazil = "purple", USA = "yellow", Poland = "green",
+                Thailand = "blue", China = "black", Denmark = "pink" 
+                ),
+  Phylum = phylum_col
+)
+
+ComplexHeatmap::pheatmap(matrix, scale= "row", 
+                         annotation_col = annotation_col, 
+#                         annotation_row = annotation_row, 
+                         annotation_colors = ann_colors)
